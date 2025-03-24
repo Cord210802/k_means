@@ -35,8 +35,8 @@ struct Centroid
     }
 };
 
-// Función para calcular la distancia euclidiana entre un punto y un centroide
-double distance(const Point &point, const Centroid &centroid)
+// Función inline para calcular la distancia euclidiana entre un punto y un centroide
+inline double distance(const Point &point, const Centroid &centroid)
 {
     return std::sqrt(std::pow(point.x - centroid.x, 2) + std::pow(point.y - centroid.y, 2));
 }
@@ -59,6 +59,9 @@ public:
 
         // Establecer el número de hilos para OpenMP
         omp_set_num_threads(num_threads);
+
+        // Habilitar paralelismo anidado si es necesario
+        omp_set_nested(1);
     }
 
     // Cargar los puntos desde un archivo CSV
@@ -139,38 +142,19 @@ public:
 
         centroids.clear();
 
-        // Esta parte no se paraleliza porque implica operaciones secuenciales
-        // para calcular el mínimo y máximo
+        // Optimizamos la búsqueda de mínimos y máximos con reduction
         double min_x = std::numeric_limits<double>::max();
-        double max_x = std::numeric_limits<double>::min();
+        double max_x = std::numeric_limits<double>::lowest(); // Usando lowest en lugar de min para valores negativos
         double min_y = std::numeric_limits<double>::max();
-        double max_y = std::numeric_limits<double>::min();
+        double max_y = std::numeric_limits<double>::lowest();
 
-// Sin embargo, podemos paralelizar la búsqueda de mínimos y máximos
-#pragma omp parallel
+#pragma omp parallel for reduction(min : min_x, min_y) reduction(max : max_x, max_y)
+        for (size_t i = 0; i < points.size(); i++)
         {
-            double local_min_x = std::numeric_limits<double>::max();
-            double local_max_x = std::numeric_limits<double>::min();
-            double local_min_y = std::numeric_limits<double>::max();
-            double local_max_y = std::numeric_limits<double>::min();
-
-#pragma omp for
-            for (size_t i = 0; i < points.size(); i++)
-            {
-                local_min_x = std::min(local_min_x, points[i].x);
-                local_max_x = std::max(local_max_x, points[i].x);
-                local_min_y = std::min(local_min_y, points[i].y);
-                local_max_y = std::max(local_max_y, points[i].y);
-            }
-
-// Reducir los mínimos y máximos locales a valores globales
-#pragma omp critical
-            {
-                min_x = std::min(min_x, local_min_x);
-                max_x = std::max(max_x, local_max_x);
-                min_y = std::min(min_y, local_min_y);
-                max_y = std::max(max_y, local_max_y);
-            }
+            min_x = std::min(min_x, points[i].x);
+            max_x = std::max(max_x, points[i].x);
+            min_y = std::min(min_y, points[i].y);
+            max_y = std::max(max_y, points[i].y);
         }
 
         std::uniform_real_distribution<double> dist_x(min_x, max_x);
@@ -196,17 +180,21 @@ public:
             centroid.clear();
         }
 
-        // Vector para almacenar los puntos asignados a cada centroide por cada hilo
-        std::vector<std::vector<std::vector<int>>> thread_centroid_points(num_threads,
-                                                                          std::vector<std::vector<int>>(centroids.size()));
-
-        // Flag para saber si hubo cambios (uno por hilo)
-        std::vector<bool> local_changed(num_threads, false);
-
-// Paralelizar la asignación de puntos
-#pragma omp parallel
+        // Usamos un mutex para proteger las actualizaciones a centroids.points
+        std::vector<omp_lock_t> centroid_locks(centroids.size());
+        for (size_t i = 0; i < centroids.size(); i++)
         {
+            omp_init_lock(&centroid_locks[i]);
+        }
+
+// Paralelizar la asignación de puntos con reducción booleana para 'changed'
+#pragma omp parallel reduction(|| : changed)
+        {
+            int actual_threads = omp_get_num_threads();
             int thread_id = omp_get_thread_num();
+
+            // Creamos estructuras locales para cada hilo
+            std::vector<std::vector<int>> local_centroid_points(centroids.size());
 
 #pragma omp for
             for (size_t i = 0; i < points.size(); i++)
@@ -229,29 +217,33 @@ public:
                     // Verificar si la asignación del cluster cambió
                     if (points[i].cluster != closest_centroid)
                     {
-                        local_changed[thread_id] = true;
+                        changed = true;
                         points[i].cluster = closest_centroid;
                     }
-                    // Guardar el índice del punto en la estructura local del hilo
-                    thread_centroid_points[thread_id][closest_centroid].push_back(i);
+                    // Almacenar el punto localmente para este hilo
+                    local_centroid_points[closest_centroid].push_back(i);
+                }
+            }
+
+            // Ahora combinamos los resultados locales con protección de locks
+            for (size_t j = 0; j < centroids.size(); j++)
+            {
+                if (!local_centroid_points[j].empty())
+                {
+                    omp_set_lock(&centroid_locks[j]);
+                    centroids[j].points.insert(
+                        centroids[j].points.end(),
+                        local_centroid_points[j].begin(),
+                        local_centroid_points[j].end());
+                    omp_unset_lock(&centroid_locks[j]);
                 }
             }
         }
 
-        // Combinar los resultados de todos los hilos
-        for (int t = 0; t < num_threads; t++)
+        // Liberamos los locks
+        for (size_t i = 0; i < centroids.size(); i++)
         {
-            if (local_changed[t])
-            {
-                changed = true;
-            }
-
-            for (size_t j = 0; j < centroids.size(); j++)
-            {
-                centroids[j].points.insert(centroids[j].points.end(),
-                                           thread_centroid_points[t][j].begin(),
-                                           thread_centroid_points[t][j].end());
-            }
+            omp_destroy_lock(&centroid_locks[i]);
         }
 
         return changed;
@@ -260,7 +252,7 @@ public:
     // Paso 3: Actualizar la posición de los centroides
     void updateCentroids()
     {
-// Para cada centroide
+// Evitamos paralelismo anidado aquí, solo paralelizamos el bucle externo
 #pragma omp parallel for
         for (size_t i = 0; i < centroids.size(); i++)
         {
@@ -271,10 +263,10 @@ public:
 
             double sum_x = 0.0;
             double sum_y = 0.0;
+            size_t count = centroids[i].points.size();
 
-// Usar reduction para sumar las coordenadas
-#pragma omp parallel for reduction(+ : sum_x, sum_y)
-            for (size_t j = 0; j < centroids[i].points.size(); j++)
+            // Calculamos la suma secuencialmente para evitar paralelismo anidado
+            for (size_t j = 0; j < count; j++)
             {
                 int point_idx = centroids[i].points[j];
                 sum_x += points[point_idx].x;
@@ -282,8 +274,8 @@ public:
             }
 
             // Actualizar la posición del centroide
-            centroids[i].x = sum_x / centroids[i].points.size();
-            centroids[i].y = sum_y / centroids[i].points.size();
+            centroids[i].x = sum_x / count;
+            centroids[i].y = sum_y / count;
         }
     }
 
@@ -334,7 +326,7 @@ public:
 int main()
 {
     // Ruta fija para el archivo de entrada
-    std::string input_file = "./1000_data.csv";
+    std::string input_file = "/home/cord2108/ITAM/Paralelo/proyecto/100000_data.csv";
 
     // Número fijo de clusters - MODIFICAR AQUÍ PARA CAMBIAR EL VALOR
     const int k = 5;
@@ -346,8 +338,9 @@ int main()
     const int num_threads = 4;
 
     // Extraer el número de puntos del nombre del archivo (asumiendo formato "n_data.csv")
-    std::string n_points_str = input_file.substr(0, input_file.find("_"));
-    std::string output_file = n_points_str + "_results_omp.csv";
+    std::string n_points_str = input_file.substr(input_file.find_last_of("/") + 1);
+    n_points_str = n_points_str.substr(0, n_points_str.find("_"));
+    std::string output_file = n_points_str + "_results_op.csv";
 
     KMeansParallel kmeans(k, num_threads);
 
