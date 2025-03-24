@@ -144,7 +144,7 @@ public:
 
         // Optimizamos la búsqueda de mínimos y máximos con reduction
         double min_x = std::numeric_limits<double>::max();
-        double max_x = std::numeric_limits<double>::lowest(); // Usando lowest en lugar de min para valores negativos
+        double max_x = std::numeric_limits<double>::lowest();
         double min_y = std::numeric_limits<double>::max();
         double max_y = std::numeric_limits<double>::lowest();
 
@@ -252,7 +252,6 @@ public:
     // Paso 3: Actualizar la posición de los centroides
     void updateCentroids()
     {
-// Evitamos paralelismo anidado aquí, solo paralelizamos el bucle externo
 #pragma omp parallel for
         for (size_t i = 0; i < centroids.size(); i++)
         {
@@ -300,9 +299,10 @@ public:
             // Paso 2: Asignar puntos a centroides
             changed = assignPointsToCentroids();
 
-            // Paso 3: Actualizar posición de centroides
-            updateCentroids();
-
+            if (changed)
+            {
+                updateCentroids();
+            }
             iteration++;
         }
 
