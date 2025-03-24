@@ -1,4 +1,4 @@
-Puntos,Hilos,Tiempo Serial (ms),Tiempo Paralelo (ms),Speedup
+Puntos,Hilos,Tiempo Serial (ms),Tiempo Paralelo (ms),Speedup 
 100000,1,491.00,458.85,1.0701
 100000,6,456.01,157.58,2.8938
 100000,12,463.21,104.62,4.4277
