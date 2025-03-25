@@ -36,8 +36,8 @@ struct Centroid
     }
 };
 
-// Función inline para calcular la distancia euclidiana entre un punto y un centroide
-inline double distance(const Point &point, const Centroid &centroid)
+// Función para calcular la distancia euclidiana entre un punto y un centroide
+double distance(const Point &point, const Centroid &centroid)
 {
     return std::sqrt(std::pow(point.x - centroid.x, 2) + std::pow(point.y - centroid.y, 2));
 }
@@ -260,7 +260,7 @@ public:
     }
 };
 
-// Implementación paralela optimizada del algoritmo K-means con OpenMP
+// Implementación paralela del algoritmo K-means con OpenMP
 class KMeansParallel
 {
 private:
@@ -399,19 +399,9 @@ public:
             centroid.clear();
         }
 
-        // Usamos un mutex para proteger las actualizaciones a centroids.points
-        std::vector<omp_lock_t> centroid_locks(centroids.size());
-        for (size_t i = 0; i < centroids.size(); i++)
-        {
-            omp_init_lock(&centroid_locks[i]);
-        }
-
 // Paralelizar la asignación de puntos con reducción booleana para 'changed'
 #pragma omp parallel reduction(|| : changed)
         {
-            int actual_threads = omp_get_num_threads();
-            int thread_id = omp_get_thread_num();
-
             // Creamos estructuras locales para cada hilo
             std::vector<std::vector<int>> local_centroid_points(centroids.size());
 
@@ -444,25 +434,20 @@ public:
                 }
             }
 
-            // Ahora combinamos los resultados locales con protección de locks
+            // Ahora combinamos los resultados locales con una sección crítica
             for (size_t j = 0; j < centroids.size(); j++)
             {
                 if (!local_centroid_points[j].empty())
                 {
-                    omp_set_lock(&centroid_locks[j]);
-                    centroids[j].points.insert(
-                        centroids[j].points.end(),
-                        local_centroid_points[j].begin(),
-                        local_centroid_points[j].end());
-                    omp_unset_lock(&centroid_locks[j]);
+#pragma omp critical
+                    {
+                        centroids[j].points.insert(
+                            centroids[j].points.end(),
+                            local_centroid_points[j].begin(),
+                            local_centroid_points[j].end());
+                    }
                 }
             }
-        }
-
-        // Liberamos los locks
-        for (size_t i = 0; i < centroids.size(); i++)
-        {
-            omp_destroy_lock(&centroid_locks[i]);
         }
 
         return changed;
@@ -520,7 +505,6 @@ public:
 
             if (changed)
             {
-                // Paso 3: Actualizar posición de centroides
                 updateCentroids();
             }
             iteration++;
